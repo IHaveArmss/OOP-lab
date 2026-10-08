@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Convenience runner script for labs
+# Usage:
+#   ./run lab2
+#   ./run -- lab2
+
+if [ "$1" = "--" ]; then
+    shift
+fi
+
+TARGET="$1"
+shift
+
+if [ -z "$TARGET" ]; then
+    echo "Usage: ./run lab<number> (e.g., ./run lab2 or ./run -- lab2)"
+    exit 1
+fi
+
+./gradlew "$TARGET" "$@"

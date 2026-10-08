@@ -1,0 +1,165 @@
+plugins {
+    id 'java'
+}
+
+def findMainClass(File labDir) {
+    if (!labDir.exists() || !labDir.isDirectory()) {
+        return null
+    }
+
+    def javaFiles = labDir.listFiles()?.findAll { it.name.endsWith('.java') }
+    if (!javaFiles || javaFiles.isEmpty()) {
+        return null
+    }
+
+    // Sort so Main.java / main.java is checked first
+    def sortedFiles = javaFiles.sort { a, b ->
+        if (a.name.equalsIgnoreCase('Main.java')) return -1
+        if (b.name.equalsIgnoreCase('Main.java')) return 1
+        return a.name <=> b.name
+    }
+
+    for (File f : sortedFiles) {
+        def text = f.text
+        if (text =~ /public\s+static\s+void\s+main\s*\(/) {
+            def pkgMatcher = (text =~ /package\s+([a-zA-Z0-9_.]+)\s*;/)
+            def pkg = pkgMatcher ? pkgMatcher[0][1] : null
+
+            def classMatches = []
+            def matcher = (text =~ /(?:class|record|enum)\s+([A-Za-z0-9_]+)/)
+            while (matcher.find()) {
+                classMatches << [name: matcher.group(1), index: matcher.start()]
+            }
+
+            def targetClass = null
+            if (classMatches.size() == 1) {
+                targetClass = classMatches[0].name
+            } else if (classMatches.size() > 1) {
+                def mainIdx = (text =~ /public\s+static\s+void\s+main\s*\(/)
+                if (mainIdx.find()) {
+                    def mainPos = mainIdx.start()
+                    def candidates = classMatches.findAll { it.index < mainPos }
+                    if (!candidates.isEmpty()) {
+                        targetClass = candidates.last().name
+                    }
+                }
+            }
+
+            if (!targetClass) {
+                targetClass = f.name.replace('.java', '')
+            }
+
+            return pkg ? "${pkg}.${targetClass}" : targetClass
+        }
+    }
+
+    // Fallback: Main or first file name
+    def defaultFile = sortedFiles[0]
+    return defaultFile.name.replace('.java', '')
+}
+
+def registerLabTask(String labName) {
+    if (tasks.findByName(labName)) return
+
+    def labDir = file(labName)
+    def classesOutDir = layout.buildDirectory.dir("classes/${labName}")
+
+    def compileTask = tasks.register("compile${labName.capitalize()}", JavaCompile) {
+        group = 'build'
+        description = "Compiles Java files for ${labName}"
+        source = fileTree(labDir) { include '**/*.java' }
+        destinationDirectory = classesOutDir
+        classpath = files()
+        options.encoding = 'UTF-8'
+        onlyIf { labDir.exists() && !fileTree(labDir) { include '**/*.java' }.isEmpty() }
+    }
+
+    tasks.register(labName, JavaExec) {
+        group = 'application'
+        description = "Runs the main class for ${labName}"
+        dependsOn compileTask
+
+        mainClass = providers.provider {
+            if (!labDir.exists() || fileTree(labDir) { include '**/*.java' }.isEmpty()) {
+                throw new GradleException("Lab folder '${labName}' does not exist or has no .java files!")
+            }
+            def main = findMainClass(labDir)
+            if (!main) {
+                throw new GradleException("Could not find a main class in ${labName}!")
+            }
+            return main
+        }
+
+        classpath = files(classesOutDir)
+        standardInput = System.in
+    }
+}
+
+// Pre-register labs 2 through 14
+(2..14).each { registerLabTask("lab${it}") }
+
+// Dynamically handle any other lab number on the fly (e.g. lab15, lab16...)
+tasks.addRule("Pattern: lab<ID>") { String taskName ->
+    if (taskName =~ /^lab\d+$/) {
+        registerLabTask(taskName)
+    }
+}
+
+// General 'run' task that also supports:
+// ./gradlew run -Plab=lab2
+// ./gradlew run --args="lab2"
+tasks.register('run') {
+    group = 'application'
+    description = 'Runs a specified lab, e.g., ./gradlew run --args="lab2" or ./gradlew lab2'
+
+    def targetLab = providers.provider {
+        def target = project.findProperty('lab')
+        if (project.hasProperty('args')) {
+            def rawArgs = project.property('args').toString().trim().split('\\s+') as List
+            if (!target && !rawArgs.isEmpty()) {
+                target = rawArgs[0]
+            }
+        }
+        if (target) {
+            target = target.toString().replaceFirst(/^--\s*/, '').trim()
+        }
+        return target
+    }
+
+    dependsOn {
+        def target = targetLab.orNull
+        target ? "compile${target.capitalize()}" : []
+    }
+
+    doLast {
+        def target = targetLab.orNull
+        if (!target) {
+            throw new GradleException("Please specify a lab to run, e.g.:\n  ./gradlew lab2\n  ./gradlew -- lab2\n  ./gradlew run -Plab=lab2")
+        }
+
+        def labDir = file(target)
+        if (!labDir.exists()) {
+            throw new GradleException("Directory '${target}' does not exist.")
+        }
+
+        def main = findMainClass(labDir)
+        if (!main) {
+            throw new GradleException("Could not find a main class in '${target}'.")
+        }
+
+        def extraArgs = []
+        if (project.hasProperty('args')) {
+            def rawArgs = project.property('args').toString().trim().split('\\s+') as List
+            if (rawArgs.size() > 1) {
+                extraArgs = rawArgs.subList(1, rawArgs.size())
+            }
+        }
+
+        javaexec {
+            mainClass = main
+            classpath = files(layout.buildDirectory.dir("classes/${target}"))
+            standardInput = System.in
+            args = extraArgs
+        }
+    }
+}
